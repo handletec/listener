@@ -21,14 +21,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 // TLS - configure TLS information
 type TLS struct {
-	clientCAs         *x509.CertPool
+	ca                *x509.CertPool
 	certFile, keyFile string
 	at                TLSClientAuth
+
+	cert    atomic.Value      // holds *tls.Certificate
+	watcher *fsnotify.Watcher // internal fsnotify watcher
+	done    chan struct{}     // signals watcher shutdown
 }
 
 // NewTLS - create new instance of TLS
@@ -37,17 +46,22 @@ func NewTLS(useOSCA bool) (t *TLS, err error) {
 	t.at = TLSClientAuthNone // default client auth type is none
 
 	if useOSCA {
-		t.clientCAs, err = x509.SystemCertPool()
+		t.ca, err = x509.SystemCertPool()
 		if nil != err {
 			return nil, fmt.Errorf("new tls: %w", err)
 		}
 
-		if nil == t.clientCAs {
-			t.clientCAs = x509.NewCertPool() // if the system CA pool is empty, create a new empty instance
+		if nil == t.ca {
+			t.ca = x509.NewCertPool() // if the system CA pool is empty, create a new empty instance
 		}
 	} else {
-		t.clientCAs = x509.NewCertPool() // create a new instance of cert pool
+		t.ca = x509.NewCertPool() // create a new instance of cert pool
 	}
+
+	// register finalizer for automatic cleanup
+	runtime.SetFinalizer(t, func(obj *TLS) {
+		obj.Close()
+	})
 
 	return
 }
@@ -59,28 +73,20 @@ func (t *TLS) AddCADir(cadirname string) (err error) {
 		return // if an empty CA dirname is given, return immediately
 	}
 
-	cadir, err := os.Open(cadirname)
-	if nil != err {
-		return fmt.Errorf("add CA directory: error opening CA directory '%s' -> %w", cadirname, err)
+	entries, err := os.ReadDir(cadirname)
+	if err != nil {
+		return fmt.Errorf("add CA directory: error reading '%s' -> %w", cadirname, err)
 	}
 
-	files, err := cadir.Readdir(-1)
-	if nil != err {
-		return fmt.Errorf("add CA directory: error reading CA directory '%s' -> %w", cadirname, err)
-	}
+	for _, entry := range entries {
 
-	for _, file := range files {
-
-		if file.Mode().IsRegular() {
-
-			switch strings.ToLower(filepath.Ext(file.Name())) {
-			case ".crt", ".pem": // only these 2 files are supporteds
-				err = t.AddCAFile(filepath.Join(cadirname, file.Name()))
-				if nil != err {
-					return fmt.Errorf("add CA directory: reading contents of client CA file '%s' error -> %w", file, err)
+		if entry.Type().IsRegular() {
+			switch strings.ToLower(filepath.Ext(entry.Name())) {
+			case ".crt", ".pem":
+				path := filepath.Join(cadirname, entry.Name())
+				if err := t.AddCAFile(path); err != nil {
+					return fmt.Errorf("add CA directory: reading contents of client CA file '%s' error -> %w", entry.Name(), err)
 				}
-			default:
-				// do nothing
 			}
 		}
 	}
@@ -110,7 +116,7 @@ func (t *TLS) AddCAFile(cafile string) (err error) {
 
 // AddCABytes - adds a certificate authority from bytes
 func (t *TLS) AddCABytes(cabytes []byte) (err error) {
-	if !t.clientCAs.AppendCertsFromPEM(cabytes) {
+	if !t.ca.AppendCertsFromPEM(cabytes) {
 		return fmt.Errorf("add CA bytes: unable to append client CA bytes")
 	}
 
@@ -181,18 +187,93 @@ func (t *TLS) GetTLSconfig() (tlsConfig *tls.Config) {
 	// if both the cert and key file are given, only then we specify the function to read them for every request
 	if len(t.certFile) != 0 && len(t.keyFile) != 0 {
 		tlsConfig = &tls.Config{
-			ClientCAs:  t.clientCAs,      // server uses this CA Pool to verify client certificates
+			RootCAs:    t.ca,             // server uses this CA Pool to verify outgoing certificates (useful when we reuse this code on the client end)
+			ClientCAs:  t.ca,             // server uses this CA Pool to verify incoming client certificates
 			MinVersion: tls.VersionTLS12, // this is the minimum version of TLS we support, anything else is discarded
 			ClientAuth: t.at.AuthType(),
-			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-				cert, err := tls.LoadX509KeyPair(t.certFile, t.keyFile)
-				if nil != err {
-					return nil, fmt.Errorf("get tls certificate: %w", err)
-				}
-				return &cert, nil
-			},
+		}
+
+		// Initial load if needed
+		if t.cert.Load() == nil {
+			if err := t.reloadCert(); err != nil {
+				panic(fmt.Errorf("getTLSConfig: initial cert load failed -> %w", err))
+			}
+		}
+
+		// Zero‑overhead handshake path
+		cert := t.cert.Load().(*tls.Certificate)
+		tlsConfig.Certificates = []tls.Certificate{*cert}
+
+		// Start watcher once
+		if t.watcher == nil {
+			t.startWatcher()
 		}
 	}
 
 	return tlsConfig
+}
+
+// reloadCert reads the cert/key pair from disk and updates the atomic cache.
+func (t *TLS) reloadCert() error {
+	pair, err := tls.LoadX509KeyPair(t.certFile, t.keyFile)
+	if err != nil {
+		return fmt.Errorf("reload cert: %w", err)
+	}
+	t.cert.Store(&pair)
+	return nil
+}
+
+// startWatcher initializes fsnotify to watch certFile and keyFile directories.
+func (t *TLS) startWatcher() {
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tls watcher init error: %v\n", err)
+		return
+	}
+	t.watcher = w
+	t.done = make(chan struct{})
+
+	dirs := map[string]struct{}{
+		filepath.Dir(t.certFile): {},
+		filepath.Dir(t.keyFile):  {},
+	}
+	for d := range dirs {
+		if err := w.Add(d); err != nil {
+			fmt.Fprintf(os.Stderr, "tls watcher watch %s error: %v\n", d, err)
+		}
+	}
+
+	go func() {
+		defer w.Close()
+		for {
+			select {
+			case ev := <-w.Events:
+				if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) != 0 &&
+					(ev.Name == t.certFile || ev.Name == t.keyFile) {
+					time.Sleep(100 * time.Millisecond) // debounce
+					if err := t.reloadCert(); err != nil {
+						fmt.Fprintf(os.Stderr, "tls hot reload error: %v\n", err)
+					}
+				}
+			case err := <-w.Errors:
+				fmt.Fprintf(os.Stderr, "tls watcher error: %v\n", err)
+			case <-t.done:
+				return
+			}
+		}
+	}()
+}
+
+// Close stops the internal file watcher (call on shutdown).
+func (t *TLS) Close() {
+	if t.watcher == nil {
+		return
+	}
+	select {
+	case <-t.done:
+		// already closed
+	default:
+		close(t.done)
+	}
+	t.watcher = nil
 }
