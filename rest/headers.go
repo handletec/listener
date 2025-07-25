@@ -43,6 +43,15 @@ func (l *Listener) SetCustomHeaders(header *Header) {
 
 // headerMiddleware - inject the headers specified automatically into all requests
 func headerMiddleware(headers *Header) func(http.Handler) http.Handler {
+
+	// If headers is nil, return identity middleware
+	if headers == nil || len(*headers) == 0 {
+		return func(next http.Handler) http.Handler {
+			return next
+		}
+	}
+
+	// Inject headers if present
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			for k, v := range *headers {
