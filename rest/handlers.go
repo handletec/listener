@@ -18,6 +18,7 @@ package rest
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -52,4 +53,14 @@ func (handler *Handler) Set(method Method, pattern string, hFn http.HandlerFunc,
 	handler.h.With(middlewares...).MethodFunc(methodStr, pattern, hFn)
 
 	return
+}
+
+// optionsHandler - automatically respond to OPTIONS
+func optionsHandler(cors *CORS) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Set CORS headers
+		w.Header().Set("Access-Control-Allow-Origin", strings.Join(cors.AllowedOrigins, ","))
+		w.Header().Set("Access-Control-Allow-Methods", strings.Join(cors.AllowedMethods, ","))
+		w.Header().Set("Access-Control-Allow-Headers", strings.Join(cors.AllowedHeaders, ","))
+	}
 }

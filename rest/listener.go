@@ -162,7 +162,7 @@ func (l *Listener) Start() (err error) {
 	}))
 
 	// handle OPTIONS request, usually for CORS, though the CORS handler above does the heavy lifting for us already
-	//l.config.router.r.MethodFunc(MethodOptions.String(), PatternAll, OptionsHandler)
+	l.config.router.r.MethodFunc(MethodOptions.String(), PatternAll, optionsHandler(l.config.CORS))
 
 	//router.Mount("/", l.config.router.r) // mount the root to the given handler
 
