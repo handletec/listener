@@ -181,8 +181,8 @@ func (t *TLS) SetClientAuthType(at TLSClientAuth) (err error) {
 	return
 }
 
-// GetTLSconfig - returns istance of tls.Config for listeners
-func (t *TLS) GetTLSconfig() (tlsConfig *tls.Config) {
+// GetTLSConfig - returns istance of tls.Config for listeners
+func (t *TLS) GetTLSConfig() (tlsConfig *tls.Config) {
 
 	// if both the cert and key file are given, only then we specify the function to read them for every request
 	if len(t.certFile) != 0 && len(t.keyFile) != 0 {
