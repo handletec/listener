@@ -55,12 +55,17 @@ func (handler *Handler) Set(method Method, pattern string, hFn http.HandlerFunc,
 	return
 }
 
-// optionsHandler - automatically respond to OPTIONS
+// optionsHandler - automatically respond to OPTIONS with custom options for API calls, normal request will be handled by the CORS library itself
 func optionsHandler(cors *CORS) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Set CORS headers
 		w.Header().Set("Access-Control-Allow-Origin", strings.Join(cors.AllowedOrigins, ","))
 		w.Header().Set("Access-Control-Allow-Methods", strings.Join(cors.AllowedMethods, ","))
 		w.Header().Set("Access-Control-Allow-Headers", strings.Join(cors.AllowedHeaders, ","))
+
+		// add any custom headers to be returned
+		for k, v := range *cors.header {
+			w.Header().Set(k, v)
+		}
 	}
 }

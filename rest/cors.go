@@ -23,6 +23,7 @@ type CORS struct {
 	MaxAge           int  // maximum number of seconds the results can be cached
 	Debug            bool // debug CORS detauls
 	AllowCredentials bool // indicates if this REST service should release the response to cross-origin requests (typically JavaScript code); cross-origin are those that don't match the defined origins
+	header           *Header
 }
 
 // NewCORS - create new instance for stroring CORS information
@@ -50,6 +51,11 @@ func (c *CORS) SetMethods(v []string) {
 // SetHeaders - sets HTTP headers allowed for this REST service
 func (c *CORS) SetHeaders(v []string) {
 	c.AllowedHeaders = v
+}
+
+// SeCustomHeaders - set custom headers to be returned with CORS request
+func (c *CORS) SeCustomHeaders(header *Header) {
+	c.header = header
 }
 
 func (l *Listener) CORS(c *CORS) {

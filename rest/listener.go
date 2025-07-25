@@ -48,6 +48,7 @@ type Listener struct {
 	tlsConfig *tls.Config
 	logger    *slog.Logger
 	config    *Config
+	header    *Header
 }
 
 // New - create new instance of the REST listener
@@ -160,6 +161,8 @@ func (l *Listener) Start() (err error) {
 		MaxAge:           l.config.CORS.MaxAge, // Maximum value not ignored by any of major browsers
 		Debug:            l.config.CORS.Debug,
 	}))
+
+	router.Use(headerMiddleware(l.header))
 
 	// handle OPTIONS request, usually for CORS, though the CORS handler above does the heavy lifting for us already
 	l.config.router.r.MethodFunc(MethodOptions.String(), PatternAll, optionsHandler(l.config.CORS))
