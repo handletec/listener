@@ -64,8 +64,12 @@ func optionsHandler(cors *CORS) http.HandlerFunc {
 		w.Header().Set("Access-Control-Allow-Headers", strings.Join(cors.AllowedHeaders, ","))
 
 		// add any custom headers to be returned
-		for k, v := range *cors.header {
-			w.Header().Set(k, v)
+		if cors.header != nil {
+			for k, v := range *cors.header {
+				w.Header().Set(k, v)
+			}
 		}
+
+		w.WriteHeader(http.StatusNoContent) // finish the OPTIONS request
 	}
 }
