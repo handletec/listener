@@ -180,7 +180,7 @@ func (l *Listener) Start() (err error) {
 
 	address := fmt.Sprintf("%s:%d", l.address, l.port)
 
-	if nil != l.tlsConfig {
+	if nil != l.tlsConfig && len(l.tlsConfig.Certificates) > 0 {
 		l.logger.Info("listener started", "listener", l.Name(), "address", "https://"+address, "tls", "true")
 
 		// start HTTPS server
