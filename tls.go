@@ -208,6 +208,8 @@ func (t *TLS) GetTLSConfig() (tlsConfig *tls.Config) {
 		if t.watcher == nil {
 			t.startWatcher()
 		}
+	} else {
+		tlsConfig = new(tls.Config) // if no certificate is given, we return a new instance of `tls.Config` so it won't be nil
 	}
 
 	return tlsConfig
