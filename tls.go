@@ -184,14 +184,25 @@ func (t *TLS) SetClientAuthType(at TLSClientAuth) (err error) {
 // GetTLSConfig - returns istance of tls.Config for listeners
 func (t *TLS) GetTLSConfig() (tlsConfig *tls.Config) {
 
+	// we return a default TLS config with any existing given data
+	tlsConfig = &tls.Config{
+		RootCAs:    t.ca,             // server uses this CA Pool to verify outgoing certificates (useful when we reuse this code on the client end)
+		ClientCAs:  t.ca,             // server uses this CA Pool to verify incoming client certificates
+		MinVersion: tls.VersionTLS12, // this is the minimum version of TLS we support, anything else is discarded
+		ClientAuth: t.at.AuthType(),
+	}
+
 	// if both the cert and key file are given, only then we specify the function to read them for every request
 	if len(t.certFile) != 0 && len(t.keyFile) != 0 {
-		tlsConfig = &tls.Config{
-			RootCAs:    t.ca,             // server uses this CA Pool to verify outgoing certificates (useful when we reuse this code on the client end)
-			ClientCAs:  t.ca,             // server uses this CA Pool to verify incoming client certificates
-			MinVersion: tls.VersionTLS12, // this is the minimum version of TLS we support, anything else is discarded
-			ClientAuth: t.at.AuthType(),
-		}
+
+		/*
+			tlsConfig = &tls.Config{
+				RootCAs:    t.ca,             // server uses this CA Pool to verify outgoing certificates (useful when we reuse this code on the client end)
+				ClientCAs:  t.ca,             // server uses this CA Pool to verify incoming client certificates
+				MinVersion: tls.VersionTLS12, // this is the minimum version of TLS we support, anything else is discarded
+				ClientAuth: t.at.AuthType(),
+			}
+		*/
 
 		// Initial load if needed
 		if t.cert.Load() == nil {
@@ -209,7 +220,7 @@ func (t *TLS) GetTLSConfig() (tlsConfig *tls.Config) {
 			t.startWatcher()
 		}
 	} else {
-		tlsConfig = new(tls.Config) // if no certificate is given, we return a new instance of `tls.Config` so it won't be nil
+		//tlsConfig = new(tls.Config) // if no certificate is given, we return a new instance of `tls.Config` so it won't be nil
 	}
 
 	return tlsConfig
