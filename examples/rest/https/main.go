@@ -21,7 +21,7 @@ const (
 
 func main() {
 
-	listenerTLS, err := listener.NewTLS(true) // parameter indicates if we should use the OS CA certificate list, otherwise it creates an empty CA pool
+	listenerTLS, err := listener.NewTLSConfigBuilder(true) // parameter indicates if we should use the OS CA certificate list, otherwise it creates an empty CA pool
 	if nil != err {
 		log.Println(err)
 		os.Exit(1)
@@ -29,15 +29,8 @@ func main() {
 
 	// certificate and private key can be rotated without restarting the application
 
-	// set the certificate for this app
-	err = listenerTLS.SetCertFile("/path/to/app.crt")
-	if nil != err {
-		log.Println(err)
-		os.Exit(1)
-	}
-
-	// set the private key for this app
-	err = listenerTLS.SetKeyFile("/path/to/app.key")
+	// set the certificate and private key for this app
+	err = listenerTLS.SetCertKeyFile("/path/to/app.crt", "/path/to/app.key")
 	if nil != err {
 		log.Println(err)
 		os.Exit(1)
@@ -70,7 +63,7 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	//_ = logger
 
-	restListener.Init(logger, rest.DefaultAddr, rest.DefaultPort, listenerTLS.GetTLSConfig())
+	restListener.Init(logger, rest.DefaultAddr, rest.DefaultPort, listenerTLS.ForServer())
 	err = restListener.Start()
 	if nil != err {
 		log.Println(err)
