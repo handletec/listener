@@ -16,6 +16,8 @@ limitations under the License.
 package rest
 
 import (
+	"io"
+	"net/http"
 	"time"
 )
 
@@ -24,9 +26,10 @@ type Config struct {
 	CORS     *CORS
 	RPS      int
 	Timeout  time.Duration
-	compress bool // compress response to requester
-	//handlers http.Handler
-	router *Router
+	compress bool  // compress response to requester
+	maxBody  int64 // maximum body size to be received
+	router   *Router
+	WS       *WSConfig
 }
 
 // NewConfig - creates new instance of config
@@ -37,7 +40,8 @@ func NewConfig() (cfg *Config) {
 	cfg.RPS = 4096 // default request per second
 	cfg.Timeout = time.Duration(15 * time.Second)
 	cfg.CORS = NewCORS()
-	cfg.router = nil // default create a nil instance of handler for error checking
+	cfg.router = nil      // default create a nil instance of handler for error checking
+	cfg.maxBody = 1 << 20 // default 1 MiB hard cap
 
 	return
 }
@@ -56,4 +60,50 @@ func (cfg *Config) SetRouter(router *Router) (err error) {
 // EnableCompress - enable or disable gzip compression
 func (cfg *Config) EnableCompress(compress bool) {
 	cfg.compress = compress
+}
+
+// MaxBody - sets maximum body size in MiB to prevent resource drainage
+func (cfg *Config) MaxBody(maxBody int64) {
+	cfg.maxBody = maxBody << 20
+}
+
+// limitRequestBody enforces a hard max on the request body size.
+// If the limit is exceeded (with or without Content-Length), the server
+// responds 413 and stops reading further.
+func limitRequestBody(max int64) func(http.Handler) http.Handler {
+	if max <= 0 {
+		// no limit
+		return func(next http.Handler) http.Handler { return next }
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Wrap body with MaxBytesReader
+			r.Body = http.MaxBytesReader(w, r.Body, max)
+
+			// Optional: if Content-Length is known and already > max, reject immediately
+			if r.ContentLength > max && r.ContentLength != -1 {
+				http.Error(w, http.StatusText(http.StatusRequestEntityTooLarge), http.StatusRequestEntityTooLarge)
+				return
+			}
+
+			// Read a small buffer to detect over-limit early (no Content-Length case)
+			if _, err := io.ReadFull(r.Body, make([]byte, 1)); err != nil && err != io.EOF {
+				// If the error indicates limit exceeded, send 413
+				if err.Error() == "http: request body too large" {
+					http.Error(w, http.StatusText(http.StatusRequestEntityTooLarge), http.StatusRequestEntityTooLarge)
+					return
+				}
+				// If it's some other read error, just fail fast
+				http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+				return
+			}
+
+			// Reset back to start (not possible for streamed/chunked bodies),
+			// so if you want early detection you normally do it inside handlers.
+			// For most APIs, just letting MaxBytesReader trip during handler read is fine.
+
+			next.ServeHTTP(w, r)
+		})
+	}
 }

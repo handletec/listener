@@ -40,6 +40,9 @@ func NewCORS() (c *CORS) {
 
 // SetOrigins - sets origins allowed for this REST service
 func (c *CORS) SetOrigins(v []string) {
+	if len(v) == 0 {
+		v = []string{"https://*", "http://*"} // if no origins are given, we default to these safe options
+	}
 	c.AllowedOrigins = v
 }
 

@@ -3,6 +3,7 @@ module github.com/handletec/listener
 go 1.21.3
 
 require (
+	github.com/coder/websocket v1.8.13
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-chi/chi/v5 v5.2.2
 	github.com/go-chi/cors v1.2.2

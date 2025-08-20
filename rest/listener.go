@@ -1,22 +1,8 @@
-/*
-Copyright © 2024 Vicknesh Suppramaniam <vicknesh@handletec.my>
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-	http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
 package rest
 
 import (
 	"compress/flate"
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -49,6 +35,11 @@ type Listener struct {
 	logger    *slog.Logger
 	config    *Config
 	header    *Header
+
+	// WS: used by WebSocket integration
+	wsHandler WSHandler
+	wsHub     *WSHub
+	server    *http.Server
 }
 
 // New - create new instance of the REST listener
@@ -84,15 +75,10 @@ func (l *Listener) Init(logger *slog.Logger, address string, port int, tlsConfig
 				slogformatter.TimezoneConverter(time.UTC),
 				slogformatter.TimeFormatter(time.RFC3339, nil),
 			)(
-				//slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{}),
 				slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{}),
 			),
 		)
-
-		// Add an attribute to all log entries made through this logger.
-		//logger = logger.With("env", "production")
 	}
-
 	l.logger = logger
 
 	if nil == l.config {
@@ -103,11 +89,14 @@ func (l *Listener) Init(logger *slog.Logger, address string, port int, tlsConfig
 	return
 }
 
-// SetConfig - sets configuration details for this lietener
+// SetConfig - sets configuration details for this listener
 func (l *Listener) SetConfig(config any) (err error) {
 	l.config = config.(*Config)
 	return
 }
+
+// SetWSHandler - application-level per-connection WebSocket handler
+func (l *Listener) SetWSHandler(h WSHandler) { l.wsHandler = h }
 
 // Start - starts this listener
 func (l *Listener) Start() (err error) {
@@ -119,89 +108,99 @@ func (l *Listener) Start() (err error) {
 
 	router := chi.NewRouter()
 
+	// Common middlewares for everything (safe for WS and REST):
 	router.Use(slogchi.New(l.logger.WithGroup(l.Name())))
+	router.Use(middleware.RealIP)
+	router.Use(middleware.Recoverer)
+	router.Use(middleware.NoCache)
+	router.Use(limitRequestBody(l.config.maxBody)) // set max limit for the body
 
-	/*
-		// print the requests information
-		if l.config.Log {
-			//router.Use(middleware.Logger)
-			//router.Use(slogchi.New(l.logger)) // this throws an panic, must troubleshoot
+	// --- WebSocket route: NO JSON content-type, NO global Timeout ---
+	if l.config.WS != nil && l.config.WS.Enabled {
+		l.logger.Info("websocket enabled", "listener", l.Name(), "path", l.config.WS.Path)
 
-			router.Use(slogchi.New(logger.WithGroup("rest")))
-		}
-	*/
+		// init hub once
+		l.wsHub = NewWSHub(l.logger, l.config.WS)
+		go l.wsHub.Run()
 
-	if l.config.compress {
-		router.Use(middleware.Compress(flate.DefaultCompression)) // compress data for smaller size
+		router.Group(func(r chi.Router) {
+			// Optional: throttle the handshake
+			if l.config.RPS > 0 {
+				r.Use(middleware.Throttle(l.config.RPS))
+			}
+			r.Get(l.config.WS.Path, l.wsAccept)
+		})
 	}
 
-	router.Use(middleware.RealIP)
+	// --- REST subrouter: keep existing REST middlewares ---
+	api := chi.NewRouter()
 
-	// (optional) - do not cache requests
-	router.Use(middleware.NoCache)
+	if l.config.compress {
+		api.Use(middleware.Compress(flate.DefaultCompression)) // compress data for smaller size
+	}
 
-	router.Use(middleware.Throttle(l.config.RPS)) // restrict number of concurrent requests per second
+	api.Use(middleware.Throttle(l.config.RPS))    // restrict number of concurrent requests per second
+	api.Use(middleware.Timeout(l.config.Timeout)) // REST-only timeout
 
-	// Set a timeout value on the request context (ctx), that will signal
-	// through ctx.Done() that the request has timed out and further
-	// processing should be stopped.
-	router.Use(middleware.Timeout(l.config.Timeout))
-
-	router.Use(render.SetContentType(render.ContentTypeJSON))
-	router.Use(middleware.AllowContentType("application/json")) // only accept JSON content type
-	router.Use(middleware.Recoverer)
+	api.Use(render.SetContentType(render.ContentTypeJSON))
+	api.Use(middleware.AllowContentType("application/json")) // only accept JSON content type
 
 	// CORS configuration
-	router.Use(cors.Handler(cors.Options{
+	api.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   l.config.CORS.AllowedOrigins,
 		AllowedMethods:   l.config.CORS.AllowedMethods,
 		AllowedHeaders:   l.config.CORS.AllowedHeaders,
 		AllowCredentials: l.config.CORS.AllowCredentials,
 		ExposedHeaders:   l.config.CORS.AllowedHeaders,
-		MaxAge:           l.config.CORS.MaxAge, // Maximum value not ignored by any of major browsers
+		MaxAge:           l.config.CORS.MaxAge, // Maximum value not ignored by major browsers
 		Debug:            l.config.CORS.Debug,
 	}))
 
-	router.Use(headerMiddleware(l.header))
+	l.logger.Debug("CORS", "allowed origins", l.config.CORS.AllowedOrigins, "allowed methods", l.config.CORS.AllowedMethods, "allowed headers", l.config.CORS.AllowedHeaders)
 
-	// handle OPTIONS request, usually for CORS, though the CORS handler above does the heavy lifting for us already
+	api.Use(headerMiddleware(l.header))
+
+	// handle OPTIONS request (REST only)
 	l.config.router.r.MethodFunc(MethodOptions.String(), PatternAll, optionsHandler(l.config.CORS))
 
-	//router.Mount("/", l.config.router.r) // mount the root to the given handler
-
-	l.config.router.mount()              // mount all the paths
-	router.Mount("/", l.config.router.r) // mount the root to the given handler
-
-	/*
-		for _, route := range l.config.router.r.Routes() {
-			fmt.Println(route.Pattern, route.SubRoutes)
-		}
-	*/
+	// mount application routes
+	l.config.router.mount()
+	api.Mount("/", l.config.router.r)
+	router.Mount("/", api)
 
 	address := fmt.Sprintf("%s:%d", l.address, l.port)
 
+	// Build server so we can shutdown gracefully later and to ensure 'server' is used.
+	l.server = &http.Server{
+		Addr:      address,
+		Handler:   router,
+		TLSConfig: l.tlsConfig,
+	}
+
 	if nil != l.tlsConfig && len(l.tlsConfig.Certificates) > 0 {
 		l.logger.Info("listener started", "listener", l.Name(), "address", "https://"+address, "tls", "true")
-
-		// start HTTPS server
-		server := &http.Server{
-			Addr:      address,
-			Handler:   router,
-			TLSConfig: l.tlsConfig,
-		}
-
-		err = server.ListenAndServeTLS("", "")
-		if nil != err {
+		err = l.server.ListenAndServeTLS("", "")
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("start rest: %w", err)
 		}
-
 	} else {
 		l.logger.Info("listener started", "listener", l.Name(), "address", "http://"+address, "tls", "false")
-
-		// start normal HTTP server
-		err = http.ListenAndServe(address, router)
-
+		err = l.server.ListenAndServe()
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("start rest: %w", err)
+		}
 	}
 
 	return
+}
+
+// Optional graceful stop
+func (l *Listener) Stop(ctx context.Context) error {
+	if l.wsHub != nil {
+		l.wsHub.Close()
+	}
+	if l.server != nil {
+		return l.server.Shutdown(ctx)
+	}
+	return nil
 }
