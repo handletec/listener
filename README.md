@@ -9,3 +9,4 @@ Currently, only the `REST` is implemented. `TCP`, `UDP` and `MQTT` support will 
 Guides on how to use the library is explained the `docs` folder, which contains documentation for each of the listener 
 
 1. [REST](docs/rest/index.md)
+2. [Unix Socket](docs/usocket/index.md)

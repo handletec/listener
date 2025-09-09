@@ -20,6 +20,8 @@ import (
 	"strings"
 
 	"github.com/handletec/listener/rest"
+	"github.com/handletec/listener/usocket"
+	"github.com/svicknesh/enum2str"
 )
 
 // Protocol - custom protocol definitions
@@ -28,7 +30,7 @@ type Protocol uint8
 const (
 	ProtoNone Protocol = iota
 	ProtoREST
-	ProtoMQTT
+	ProtoUnixSocket
 )
 
 // Listener - returns listener implementation for this protocol
@@ -41,8 +43,8 @@ func (proto Protocol) Listener() (l Listener, err error) {
 	switch proto {
 	case ProtoREST:
 		l = new(rest.Listener)
-	case ProtoMQTT:
-		//l = new(mqtt.Listener)
+	case ProtoUnixSocket:
+		l = new(usocket.Listener)
 	}
 
 	return
@@ -58,15 +60,7 @@ func (proto Protocol) IsValid() (valid bool) {
 }
 
 func (proto Protocol) String() (str string) {
-
-	protoName := []string{"NONE", "REST", "MQTT"}
-	protoInt := int(proto)
-
-	if protoInt < 0 || protoInt >= len(protoName) {
-		protoInt = 0
-	}
-
-	return protoName[protoInt]
+	return enum2str.String(proto, "NONE", "REST", "UNIX-SOCKET")
 }
 
 // ParseProto - returns protocol type from given string
@@ -75,8 +69,8 @@ func ParseProto(protoStr string) (proto Protocol) {
 	switch strings.ToUpper(protoStr) {
 	case "REST":
 		proto = ProtoREST
-	case "MQTT":
-		proto = ProtoMQTT
+	case "UNIX-SOCKET":
+		proto = ProtoUnixSocket
 	default:
 		// if something unrecognized is given, set it to none
 		proto = ProtoNone
