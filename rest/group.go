@@ -28,7 +28,7 @@ type Group struct {
 // NewGroup - create new instance of group
 func NewGroup(base string, middlewares ...func(http.Handler) http.Handler) (group *Group) {
 	group = new(Group)
-	group.g = NewNewHandler()
+	group.g = NewHandler()
 
 	/*
 		// add '/' at the start if none exists

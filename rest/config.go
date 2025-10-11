@@ -16,20 +16,19 @@ limitations under the License.
 package rest
 
 import (
-	"io"
 	"net/http"
 	"time"
 )
 
 // Config - listener specific configuration
 type Config struct {
-	CORS     *CORS
-	RPS      int
-	Timeout  time.Duration
-	compress bool  // compress response to requester
-	maxBody  int64 // maximum body size to be received
-	router   *Router
-	WS       *WSConfig
+	CORS          *CORS
+	MaxConcurrent int
+	Timeout       time.Duration
+	compress      bool  // compress response to requester
+	maxBody       int64 // maximum body size to be received
+	router        *Router
+	WS            *WSConfig
 }
 
 // NewConfig - creates new instance of config
@@ -37,7 +36,7 @@ func NewConfig() (cfg *Config) {
 	cfg = new(Config)
 
 	// set default configuration
-	cfg.RPS = 4096 // default request per second
+	cfg.MaxConcurrent = 4096 // maximum concurrent requests per second
 	cfg.Timeout = time.Duration(15 * time.Second)
 	cfg.CORS = NewCORS()
 	cfg.router = nil      // default create a nil instance of handler for error checking
@@ -72,37 +71,16 @@ func (cfg *Config) MaxBody(maxBody int64) {
 // responds 413 and stops reading further.
 func limitRequestBody(max int64) func(http.Handler) http.Handler {
 	if max <= 0 {
-		// no limit
 		return func(next http.Handler) http.Handler { return next }
 	}
-
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Wrap body with MaxBytesReader
 			r.Body = http.MaxBytesReader(w, r.Body, max)
-
-			// Optional: if Content-Length is known and already > max, reject immediately
-			if r.ContentLength > max && r.ContentLength != -1 {
+			// If Content-Length is known and already too big, fail fast.
+			if r.ContentLength != -1 && r.ContentLength > max {
 				http.Error(w, http.StatusText(http.StatusRequestEntityTooLarge), http.StatusRequestEntityTooLarge)
 				return
 			}
-
-			// Read a small buffer to detect over-limit early (no Content-Length case)
-			if _, err := io.ReadFull(r.Body, make([]byte, 1)); err != nil && err != io.EOF {
-				// If the error indicates limit exceeded, send 413
-				if err.Error() == "http: request body too large" {
-					http.Error(w, http.StatusText(http.StatusRequestEntityTooLarge), http.StatusRequestEntityTooLarge)
-					return
-				}
-				// If it's some other read error, just fail fast
-				http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
-				return
-			}
-
-			// Reset back to start (not possible for streamed/chunked bodies),
-			// so if you want early detection you normally do it inside handlers.
-			// For most APIs, just letting MaxBytesReader trip during handler read is fine.
-
 			next.ServeHTTP(w, r)
 		})
 	}

@@ -28,8 +28,8 @@ type Handler struct {
 	h *chi.Mux
 }
 
-// NewNewHandler - create new instance of handler
-func NewNewHandler() (handler *Handler) {
+// NewHandler - create new instance of handler
+func NewHandler() (handler *Handler) {
 	handler = new(Handler)
 	handler.h = chi.NewRouter()
 

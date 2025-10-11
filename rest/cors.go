@@ -56,8 +56,8 @@ func (c *CORS) SetHeaders(v []string) {
 	c.AllowedHeaders = v
 }
 
-// SeCustomHeaders - set custom headers to be returned with CORS request
-func (c *CORS) SeCustomHeaders(header *Header) {
+// SetCustomHeaders - set custom headers to be returned with CORS request
+func (c *CORS) SetCustomHeaders(header *Header) {
 	c.header = header
 }
 

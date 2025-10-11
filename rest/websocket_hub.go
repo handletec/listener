@@ -38,11 +38,12 @@ type WSHub struct {
 }
 
 type wsClient struct {
-	conn   *websocket.Conn
-	out    chan hubMsg // bounded queue per client
-	cfg    *WSConfig
-	log    *slog.Logger
-	closed chan struct{}
+	conn      *websocket.Conn
+	out       chan hubMsg // bounded queue per client
+	cfg       *WSConfig
+	log       *slog.Logger
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
 func NewWSHub(log *slog.Logger, cfg *WSConfig) *WSHub {
@@ -162,12 +163,7 @@ func (c *wsClient) TrySend(t websocket.MessageType, b []byte) bool {
 }
 
 func (c *wsClient) close() {
-	select {
-	case <-c.closed:
-		return
-	default:
-		close(c.out)
-	}
+	c.closeOnce.Do(func() { close(c.out) })
 }
 
 func max(a, b int) int {

@@ -1,14 +1,16 @@
 package rest
 
 import (
-	"compress/flate"
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -91,8 +93,12 @@ func (l *Listener) Init(logger *slog.Logger, address string, port int, tlsConfig
 
 // SetConfig - sets configuration details for this listener
 func (l *Listener) SetConfig(config any) (err error) {
-	l.config = config.(*Config)
-	return
+	cfg, ok := config.(*Config)
+	if !ok {
+		return fmt.Errorf("setconfig: want '*rest.Config', got %T", config)
+	}
+	l.config = cfg
+	return nil
 }
 
 // SetWSHandler - application-level per-connection WebSocket handler
@@ -125,8 +131,8 @@ func (l *Listener) Start() (err error) {
 
 		router.Group(func(r chi.Router) {
 			// Optional: throttle the handshake
-			if l.config.RPS > 0 {
-				r.Use(middleware.Throttle(l.config.RPS))
+			if l.config.MaxConcurrent > 0 {
+				r.Use(middleware.Throttle(l.config.MaxConcurrent))
 			}
 			r.Get(l.config.WS.Path, l.wsAccept)
 		})
@@ -136,14 +142,31 @@ func (l *Listener) Start() (err error) {
 	api := chi.NewRouter()
 
 	if l.config.compress {
-		api.Use(middleware.Compress(flate.DefaultCompression)) // compress data for smaller size
+		//api.Use(middleware.Compress(flate.DefaultCompression)) // compress data for smaller size
+		api.Use(middleware.Compress(gzip.DefaultCompression)) // or: middleware.Compress(-1)
 	}
 
-	api.Use(middleware.Throttle(l.config.RPS))    // restrict number of concurrent requests per second
-	api.Use(middleware.Timeout(l.config.Timeout)) // REST-only timeout
+	api.Use(middleware.Throttle(l.config.MaxConcurrent)) // restrict number of concurrent requests per second
+	api.Use(middleware.Timeout(l.config.Timeout))        // REST-only timeout
 
 	api.Use(render.SetContentType(render.ContentTypeJSON))
-	api.Use(middleware.AllowContentType("application/json")) // only accept JSON content type
+	//api.Use(middleware.AllowContentType("application/json")) // only accept JSON content type
+
+	api.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ct := r.Header.Get("Content-Type")
+			if ct == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			mediatype, _, _ := mime.ParseMediaType(ct)
+			if mediatype != "application/json" && !strings.HasSuffix(mediatype, "+json") {
+				http.Error(w, http.StatusText(http.StatusUnsupportedMediaType), http.StatusUnsupportedMediaType)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
 
 	// CORS configuration
 	api.Use(cors.Handler(cors.Options{
@@ -151,9 +174,9 @@ func (l *Listener) Start() (err error) {
 		AllowedMethods:   l.config.CORS.AllowedMethods,
 		AllowedHeaders:   l.config.CORS.AllowedHeaders,
 		AllowCredentials: l.config.CORS.AllowCredentials,
-		ExposedHeaders:   l.config.CORS.AllowedHeaders,
 		MaxAge:           l.config.CORS.MaxAge, // Maximum value not ignored by major browsers
 		Debug:            l.config.CORS.Debug,
+		//ExposedHeaders:   l.config.CORS.AllowedHeaders,
 	}))
 
 	l.logger.Debug("CORS", "allowed origins", l.config.CORS.AllowedOrigins, "allowed methods", l.config.CORS.AllowedMethods, "allowed headers", l.config.CORS.AllowedHeaders)
@@ -161,7 +184,7 @@ func (l *Listener) Start() (err error) {
 	api.Use(headerMiddleware(l.header))
 
 	// handle OPTIONS request (REST only)
-	l.config.router.r.MethodFunc(MethodOptions.String(), PatternAll, optionsHandler(l.config.CORS))
+	//l.config.router.r.MethodFunc(MethodOptions.String(), PatternAll, optionsHandler(l.config.CORS))
 
 	// mount application routes
 	l.config.router.mount()

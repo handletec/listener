@@ -26,7 +26,7 @@ const (
 func main() {
 	restListener := rest.New()
 
-	restHandler := rest.NewNewHandler()
+	restHandler := rest.NewHandler()
 	restHandler.Set(rest.MethodGet, "/server/list", serverList, serverListMiddleWare)
 	restHandler.Set(rest.MethodGet, "/server/{type}/{id}", serverID, serverIDMiddleWare)
 
@@ -35,7 +35,7 @@ func main() {
 	grpUser.Set(rest.MethodGet, "/{id}", userID, userIDMiddleWare)
 
 	restRouter := rest.NewRouter("/api", routerMiddleWare)
-	restRouter.AddGoup(grpUser)
+	restRouter.AddGroup(grpUser)
 	restRouter.SetHandler(restHandler) // set all handlers under the base
 
 	restConfig := rest.NewConfig()

@@ -17,6 +17,7 @@ package rest
 
 import (
 	"context"
+	"crypto/subtle"
 	"net/http"
 	"strings"
 	"time"
@@ -25,14 +26,15 @@ import (
 )
 
 func (l *Listener) wsAccept(w http.ResponseWriter, r *http.Request) {
-	if !wsOriginAllowed(r, l.config.CORS.AllowedOrigins) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 
 	ws := l.config.WS
 	if ws == nil || !ws.Enabled {
 		http.Error(w, "websocket disabled", http.StatusNotFound)
+		return
+	}
+
+	if !wsOriginAllowed(r, ws.AllowedOrigins) {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -46,6 +48,7 @@ func (l *Listener) wsAccept(w http.ResponseWriter, r *http.Request) {
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		// Subprotocols: []string{"your-proto"}, // if you negotiate any
 		//OriginPatterns: []string{"http://*", "https://*"},
+		OriginPatterns: ws.AllowedOrigins, // e.g. []string{"https://*", "http://*"}
 	})
 	if err != nil {
 		l.logger.Error("ws accept failed", "err", err)
@@ -95,6 +98,43 @@ func (l *Listener) wsAccept(w http.ResponseWriter, r *http.Request) {
 
 // wsOriginAllowed mimics go-chi/cors matching rules for WS.
 func wsOriginAllowed(r *http.Request, allowed []string) bool {
+	origin := strings.ToLower(r.Header.Get("Origin"))
+
+	if len(allowed) == 0 {
+		return false
+	}
+
+	// If no Origin header, allow only when "*" is explicitly configured.
+	if origin == "" {
+		for _, o := range allowed {
+			if o == "*" {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, o := range allowed {
+		pattern := strings.ToLower(o)
+		if pattern == "*" {
+			return true
+		}
+		if strings.HasSuffix(pattern, "://*") {
+			if strings.HasPrefix(origin, strings.TrimSuffix(pattern, "*")) {
+				return true
+			}
+			continue
+		}
+		if origin == pattern {
+			return true
+		}
+	}
+	return false
+}
+
+/*
+// wsOriginAllowed mimics go-chi/cors matching rules for WS.
+func wsOriginAllowed(r *http.Request, allowed []string) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		return false // No Origin header — deny unless you want to allow CLI tools
@@ -128,13 +168,18 @@ func wsOriginAllowed(r *http.Request, allowed []string) bool {
 
 	return false
 }
+*/
 
 func checkBearer(authHeader, secret string) bool {
 	const pfx = "Bearer "
 	if !strings.HasPrefix(authHeader, pfx) {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(authHeader[len(pfx):]), secret)
+	token := strings.TrimSpace(authHeader[len(pfx):])
+	if len(token) != len(secret) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(secret)) == 1
 }
 
 func startKeepAlive(ctx context.Context, c *websocket.Conn, every time.Duration) func() {

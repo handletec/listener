@@ -54,15 +54,16 @@ func (router *Router) SetHandler(h *Handler) {
 	router.handler = h
 }
 
-// AddGoup - adds given group to the base of the router, with custom middlewares for an entire group (optional) with group middlewares being executed before handler middlewares
-func (router *Router) AddGoup(group *Group) {
+// AddGroup - adds given group to the base of the router, with custom middlewares for an entire group (optional) with group middlewares being executed before handler middlewares
+func (router *Router) AddGroup(group *Group) {
 	router.r.Mount(router.base+group.base, group.g.h)
 	//router.r.With(group.g.h.Middlewares()...).Mount(router.base+group.base, group.g.h)
 }
 
 // AddHealthCheck - creates a healthcheck endpoint at the root of the router using the GET verb, without using `base` but still respecting all middlewares for the router only
 func (router *Router) AddHealthCheck(rootPath string, hFn http.HandlerFunc) {
-	router.r.Mount(formatBase(rootPath), hFn)
+	//router.r.Mount(formatBase(rootPath), hFn)
+	router.r.MethodFunc(http.MethodGet, formatBase(rootPath), hFn)
 }
 
 // mount - makes all handlers not already available under a group to the given defined base pattern
