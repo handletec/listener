@@ -176,9 +176,6 @@ func checkBearer(authHeader, secret string) bool {
 		return false
 	}
 	token := strings.TrimSpace(authHeader[len(pfx):])
-	if len(token) != len(secret) {
-		return false
-	}
 	return subtle.ConstantTimeCompare([]byte(token), []byte(secret)) == 1
 }
 

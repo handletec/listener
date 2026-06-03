@@ -29,12 +29,13 @@ type hubMsg struct {
 }
 
 type WSHub struct {
-	log    *slog.Logger
-	cfg    *WSConfig
-	mu     sync.RWMutex
-	cl     map[*wsClient]struct{}
-	inbox  chan hubMsg
-	closed chan struct{}
+	log       *slog.Logger
+	cfg       *WSConfig
+	mu        sync.RWMutex
+	cl        map[*wsClient]struct{}
+	inbox     chan hubMsg
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
 type wsClient struct {
@@ -119,14 +120,16 @@ func (h *WSHub) Remove(cl *wsClient) {
 }
 
 func (h *WSHub) Close() {
-	close(h.closed)
-	h.mu.Lock()
-	for cl := range h.cl {
-		cl.close()
-	}
-	h.cl = map[*wsClient]struct{}{}
-	h.mu.Unlock()
-	close(h.inbox)
+	h.closeOnce.Do(func() {
+		close(h.closed)
+		h.mu.Lock()
+		for cl := range h.cl {
+			cl.close()
+		}
+		h.cl = map[*wsClient]struct{}{}
+		h.mu.Unlock()
+		close(h.inbox)
+	})
 }
 
 func (c *wsClient) writer() {

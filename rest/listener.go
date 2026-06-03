@@ -117,8 +117,26 @@ func (l *Listener) Start() (err error) {
 	// Common middlewares for everything (safe for WS and REST):
 	router.Use(slogchi.New(l.logger.WithGroup(l.Name())))
 	router.Use(middleware.RealIP)
-	router.Use(middleware.Recoverer)
+	router.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					l.logger.Error("request panic", "err", rec)
+					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+				}
+			}()
+			next.ServeHTTP(w, r)
+		})
+	})
 	router.Use(middleware.NoCache)
+	router.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("X-Frame-Options", "DENY")
+			w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+			next.ServeHTTP(w, r)
+		})
+	})
 	router.Use(limitRequestBody(l.config.maxBody)) // set max limit for the body
 
 	// --- WebSocket route: NO JSON content-type, NO global Timeout ---
@@ -195,9 +213,10 @@ func (l *Listener) Start() (err error) {
 
 	// Build server so we can shutdown gracefully later and to ensure 'server' is used.
 	l.server = &http.Server{
-		Addr:      address,
-		Handler:   router,
-		TLSConfig: l.tlsConfig,
+		Addr:              address,
+		Handler:           router,
+		TLSConfig:         l.tlsConfig,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	if nil != l.tlsConfig && len(l.tlsConfig.Certificates) > 0 {

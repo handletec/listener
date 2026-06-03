@@ -63,7 +63,12 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	//_ = logger
 
-	restListener.Init(logger, rest.DefaultAddr, rest.DefaultPort, listenerTLS.ForServer())
+	tlsCfg, err := listenerTLS.ForServer()
+	if nil != err {
+		log.Println(err)
+		os.Exit(1)
+	}
+	restListener.Init(logger, rest.DefaultAddr, rest.DefaultPort, tlsCfg)
 	err = restListener.Start()
 	if nil != err {
 		log.Println(err)

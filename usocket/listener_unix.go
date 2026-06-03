@@ -99,7 +99,7 @@ func (u *Listener) Start() error {
 		return errors.New("unix: already started")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(u.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(u.path), 0o750); err != nil {
 		return fmt.Errorf("unix: mkdir %s: %w", filepath.Dir(u.path), err)
 	}
 
@@ -259,10 +259,16 @@ func (u *Listener) acceptLoop() {
 
 			// Optional per-conn deadlines.
 			if u.cfg.ReadTimeout > 0 {
-				_ = c.SetReadDeadline(time.Now().Add(u.cfg.ReadTimeout))
+				if err := c.SetReadDeadline(time.Now().Add(u.cfg.ReadTimeout)); err != nil {
+					u.logger.Warn("unix: set read deadline failed", "err", err)
+					return
+				}
 			}
 			if u.cfg.WriteTimeout > 0 {
-				_ = c.SetWriteDeadline(time.Now().Add(u.cfg.WriteTimeout))
+				if err := c.SetWriteDeadline(time.Now().Add(u.cfg.WriteTimeout)); err != nil {
+					u.logger.Warn("unix: set write deadline failed", "err", err)
+					return
+				}
 			}
 
 			// Run the user handler.

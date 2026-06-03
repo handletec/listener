@@ -71,7 +71,8 @@ func NewTLSConfigBuilder(useSystemCA bool) (*TLSConfigBuilder, error) {
 	return t, nil
 }
 
-// SetInsecureSkipVerify - enables or disables skipping TLS verification (for testing).
+// SetInsecureSkipVerify - enables or disables skipping TLS verification.
+// WARNING: for testing only; never set true in production.
 func (t *TLSConfigBuilder) SetInsecureSkipVerify(skip bool) {
 	t.insecure = skip
 }
@@ -144,8 +145,10 @@ func (t *TLSConfigBuilder) SetCertKeyFile(certPath, keyPath string) error {
 	if err := t.FileExists(keyPath); err != nil {
 		return err
 	}
+	t.mu.Lock()
 	t.certFile = certPath
 	t.keyFile = keyPath
+	t.mu.Unlock()
 	return nil
 }
 
@@ -177,14 +180,16 @@ func (t *TLSConfigBuilder) SetClientAuth(auth TLSClientAuth) {
 }
 
 // ForServer - returns a configured *tls.Config for server usage.
-func (t *TLSConfigBuilder) ForServer() *tls.Config {
+func (t *TLSConfigBuilder) ForServer() (*tls.Config, error) {
 	tlsCfg := &tls.Config{
 		ClientAuth: t.clientAuth.AuthType(),
 		ClientCAs:  t.ca, // verifies client certificate
 		MinVersion: tls.VersionTLS12,
 	}
-	t.injectServerCert(tlsCfg)
-	return tlsCfg
+	if err := t.injectServerCert(tlsCfg); err != nil {
+		return nil, err
+	}
+	return tlsCfg, nil
 }
 
 // ForClient - returns a configured *tls.Config for client usage.
@@ -199,16 +204,21 @@ func (t *TLSConfigBuilder) ForClient() *tls.Config {
 }
 
 // injectServerCert - sets up the server certificate and starts the file watcher.
-func (t *TLSConfigBuilder) injectServerCert(cfg *tls.Config) {
-	if t.cert.Load() == nil && t.certFile != "" && t.keyFile != "" {
+func (t *TLSConfigBuilder) injectServerCert(cfg *tls.Config) error {
+	t.mu.Lock()
+	hasPaths := t.certFile != "" && t.keyFile != ""
+	t.mu.Unlock()
+
+	if t.cert.Load() == nil && hasPaths {
 		if err := t.reloadCert(); err != nil {
-			panic(fmt.Errorf("server cert load error: %w", err))
+			return fmt.Errorf("server cert load error: %w", err)
 		}
 	}
 	if cert, ok := t.cert.Load().(*tls.Certificate); ok {
 		cfg.Certificates = []tls.Certificate{*cert}
 		t.startWatcher()
 	}
+	return nil
 }
 
 // injectClientCert - sets a static client certificate if configured.
@@ -220,7 +230,11 @@ func (t *TLSConfigBuilder) injectClientCert(cfg *tls.Config) {
 
 // reloadCert - loads the TLS certificate from configured cert and key files.
 func (t *TLSConfigBuilder) reloadCert() error {
-	cert, err := tls.LoadX509KeyPair(t.certFile, t.keyFile)
+	t.mu.Lock()
+	certFile, keyFile := t.certFile, t.keyFile
+	t.mu.Unlock()
+
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return err
 	}
@@ -234,6 +248,11 @@ func (t *TLSConfigBuilder) startWatcher() {
 		return
 	}
 
+	t.mu.Lock()
+	certFile := t.certFile
+	keyFile := t.keyFile
+	t.mu.Unlock()
+
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "watcher init error: %v\n", err)
@@ -241,11 +260,13 @@ func (t *TLSConfigBuilder) startWatcher() {
 	}
 	t.watcher = w
 	dirs := map[string]struct{}{
-		filepath.Dir(t.certFile): {},
-		filepath.Dir(t.keyFile):  {},
+		filepath.Dir(certFile): {},
+		filepath.Dir(keyFile):  {},
 	}
 	for dir := range dirs {
-		_ = w.Add(dir) // ignore add errors
+		if err := w.Add(dir); err != nil {
+			fmt.Fprintf(os.Stderr, "watcher: failed to watch dir %s: %v\n", dir, err)
+		}
 	}
 	go func() {
 		defer w.Close()
@@ -253,7 +274,7 @@ func (t *TLSConfigBuilder) startWatcher() {
 			select {
 			case ev := <-w.Events:
 				if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) != 0 &&
-					(ev.Name == t.certFile || ev.Name == t.keyFile) {
+					(ev.Name == certFile || ev.Name == keyFile) {
 					time.Sleep(100 * time.Millisecond)
 					if err := t.reloadCert(); err != nil {
 						fmt.Fprintf(os.Stderr, "cert reload error: %v\n", err)

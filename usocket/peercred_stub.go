@@ -18,7 +18,12 @@ limitations under the License.
 
 package usocket
 
-import "net"
+import (
+	"errors"
+	"net"
+)
 
-// Builds on other OSes; allows everything.
-func checkPeerCred(_ *net.UnixConn, _ []uint32, _ []uint32) (bool, error) { return true, nil }
+// Peer credential checking is not supported on this platform; deny the connection.
+func checkPeerCred(_ *net.UnixConn, _ []uint32, _ []uint32) (bool, error) {
+	return false, errors.New("peer credentials not supported on this platform")
+}

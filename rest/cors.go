@@ -31,7 +31,7 @@ func NewCORS() (c *CORS) {
 	c = new(CORS)
 
 	// set default CORS
-	c.SetMethods([]string{"OPTIONS", "GET", "POST", "PUT", "DELETE", "HEAD", "CONNECT"})
+	c.SetMethods([]string{"OPTIONS", "GET", "POST", "PUT", "DELETE", "HEAD"})
 	c.SetHeaders([]string{"Accept", "Content-Type", "Authorization", "Access-Control-Request-Method", "Access-Control-Request-Headers"})
 	c.SetOrigins([]string{"https://*", "http://*"})
 
