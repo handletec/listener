@@ -10,7 +10,7 @@ require (
 	github.com/go-chi/render v1.0.3
 	github.com/samber/slog-chi v1.15.0
 	github.com/samber/slog-formatter v1.2.0
-	github.com/svicknesh/enum2str v1.0.1
+	github.com/svicknesh/enum2str v1.0.2
 	golang.org/x/sys v0.36.0
 )
 
