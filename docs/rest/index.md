@@ -253,5 +253,9 @@ if err != nil {
 }
 
 // Pass TLS config into Init
-restListener.Init(logger, "[::]", 8443, listenerTLS.ForServer())
+tlsCfg, err := listenerTLS.ForServer()
+if err != nil {
+	return fmt.Errorf("TLS server config error -> %w", err)
+}
+restListener.Init(logger, "[::]", 8443, tlsCfg)
 ```

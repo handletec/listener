@@ -8,7 +8,7 @@ You may obtain a copy of the License at
 	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
-provided under the License is distributed on an "AS IS" BASIS,
+distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
@@ -33,15 +33,16 @@ import (
 
 // TLSConfigBuilder - builds and manages tls.Config instances for both server and client.
 type TLSConfigBuilder struct {
-	ca         *x509.CertPool
-	certFile   string
-	keyFile    string
-	clientAuth TLSClientAuth
-	insecure   bool
-	cert       atomic.Value // stores *tls.Certificate
-	watcher    *fsnotify.Watcher
-	done       chan struct{}
-	mu         sync.Mutex // protects CA mutation
+	ca          *x509.CertPool
+	certFile    string
+	keyFile     string
+	clientAuth  TLSClientAuth
+	insecure    bool
+	cert        atomic.Value // stores *tls.Certificate
+	watcher     *fsnotify.Watcher
+	watcherOnce sync.Once
+	done        chan struct{}
+	mu          sync.Mutex // protects ca, certFile, keyFile, clientAuth, insecure, watcher
 }
 
 // NewTLSConfigBuilder - creates a new TLSConfigBuilder. If useSystemCA is true, it loads system root CAs.
@@ -74,7 +75,9 @@ func NewTLSConfigBuilder(useSystemCA bool) (*TLSConfigBuilder, error) {
 // SetInsecureSkipVerify - enables or disables skipping TLS verification.
 // WARNING: for testing only; never set true in production.
 func (t *TLSConfigBuilder) SetInsecureSkipVerify(skip bool) {
+	t.mu.Lock()
 	t.insecure = skip
+	t.mu.Unlock()
 }
 
 // AddCAFile - loads a CA certificate from file and adds it to the pool.
@@ -114,26 +117,38 @@ func (t *TLSConfigBuilder) AddCADir(dir string) error {
 }
 
 // AddCABytes - adds PEM-encoded certificates to the CA pool.
+// Returns an error if the input is empty, contains no CERTIFICATE blocks,
+// or any CERTIFICATE block contains malformed DER.
 func (t *TLSConfigBuilder) AddCABytes(pemData []byte) error {
+	if len(pemData) == 0 {
+		return fmt.Errorf("CA data is empty")
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	found := false
 	for {
 		block, rest := pem.Decode(pemData)
 		if block == nil {
 			break
 		}
+		pemData = rest
 		if block.Type != "CERTIFICATE" {
-			pemData = rest
 			continue
 		}
 		cert, err := x509.ParseCertificate(block.Bytes)
 		if err != nil {
-			return fmt.Errorf("parse cert: %w", err)
+			return fmt.Errorf("parse certificate: %w", err)
 		}
 		t.ca.AddCert(cert)
-		pemData = rest
+		found = true
 	}
+
+	if !found {
+		return fmt.Errorf("no certificate found in PEM data")
+	}
+
 	return nil
 }
 
@@ -176,14 +191,22 @@ func (t *TLSConfigBuilder) SetCertKeyFromBytes(certPEM, keyPEM []byte) error {
 
 // SetClientAuth - sets the desired client auth level.
 func (t *TLSConfigBuilder) SetClientAuth(auth TLSClientAuth) {
+	t.mu.Lock()
 	t.clientAuth = auth
+	t.mu.Unlock()
 }
 
 // ForServer - returns a configured *tls.Config for server usage.
+// The returned config holds a snapshot of the CA pool at the time of the call.
 func (t *TLSConfigBuilder) ForServer() (*tls.Config, error) {
+	t.mu.Lock()
+	caClone := t.ca.Clone()
+	clientAuth := t.clientAuth
+	t.mu.Unlock()
+
 	tlsCfg := &tls.Config{
-		ClientAuth: t.clientAuth.AuthType(),
-		ClientCAs:  t.ca, // verifies client certificate
+		ClientAuth: clientAuth.AuthType(),
+		ClientCAs:  caClone,
 		MinVersion: tls.VersionTLS12,
 	}
 	if err := t.injectServerCert(tlsCfg); err != nil {
@@ -193,14 +216,23 @@ func (t *TLSConfigBuilder) ForServer() (*tls.Config, error) {
 }
 
 // ForClient - returns a configured *tls.Config for client usage.
-func (t *TLSConfigBuilder) ForClient() *tls.Config {
+// Returns an error if SetCertKeyFile was used and the certificate files cannot be loaded.
+// The returned config holds a snapshot of the CA pool at the time of the call.
+func (t *TLSConfigBuilder) ForClient() (*tls.Config, error) {
+	t.mu.Lock()
+	caClone := t.ca.Clone()
+	insecure := t.insecure
+	t.mu.Unlock()
+
 	tlsCfg := &tls.Config{
-		RootCAs:            t.ca, // verifies server certificate
+		RootCAs:            caClone,
 		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: t.insecure,
+		InsecureSkipVerify: insecure, //nolint:gosec // controlled by caller via SetInsecureSkipVerify
 	}
-	t.injectClientCert(tlsCfg)
-	return tlsCfg
+	if err := t.injectClientCert(tlsCfg); err != nil {
+		return nil, err
+	}
+	return tlsCfg, nil
 }
 
 // injectServerCert - sets up the server certificate and starts the file watcher.
@@ -211,7 +243,7 @@ func (t *TLSConfigBuilder) injectServerCert(cfg *tls.Config) error {
 
 	if t.cert.Load() == nil && hasPaths {
 		if err := t.reloadCert(); err != nil {
-			return fmt.Errorf("server cert load error: %w", err)
+			return fmt.Errorf("server cert load: %w", err)
 		}
 	}
 	if cert, ok := t.cert.Load().(*tls.Certificate); ok {
@@ -221,11 +253,23 @@ func (t *TLSConfigBuilder) injectServerCert(cfg *tls.Config) error {
 	return nil
 }
 
-// injectClientCert - sets a static client certificate if configured.
-func (t *TLSConfigBuilder) injectClientCert(cfg *tls.Config) {
+// injectClientCert - loads and injects a client certificate if configured.
+// Loads from files if SetCertKeyFile was used and the cert has not yet been loaded.
+// Does not start the file watcher; client-side hot reload is out of scope.
+func (t *TLSConfigBuilder) injectClientCert(cfg *tls.Config) error {
+	t.mu.Lock()
+	hasPaths := t.certFile != "" && t.keyFile != ""
+	t.mu.Unlock()
+
+	if t.cert.Load() == nil && hasPaths {
+		if err := t.reloadCert(); err != nil {
+			return fmt.Errorf("client cert load: %w", err)
+		}
+	}
 	if cert, ok := t.cert.Load().(*tls.Certificate); ok {
 		cfg.Certificates = []tls.Certificate{*cert}
 	}
+	return nil
 }
 
 // reloadCert - loads the TLS certificate from configured cert and key files.
@@ -243,76 +287,120 @@ func (t *TLSConfigBuilder) reloadCert() error {
 }
 
 // startWatcher - initializes a file watcher to monitor changes to cert and key files.
+// Safe to call concurrently; the watcher is started at most once.
 func (t *TLSConfigBuilder) startWatcher() {
-	if t.watcher != nil {
-		return
+	t.watcherOnce.Do(func() {
+		select {
+		case <-t.done:
+			return
+		default:
+		}
+
+		t.mu.Lock()
+		certFile := t.certFile
+		keyFile := t.keyFile
+		t.mu.Unlock()
+
+		w, err := fsnotify.NewWatcher()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "watcher init error: %v\n", err)
+			return
+		}
+
+		t.mu.Lock()
+		t.watcher = w
+		t.mu.Unlock()
+
+		dirs := map[string]struct{}{
+			filepath.Dir(certFile): {},
+			filepath.Dir(keyFile):  {},
+		}
+		for dir := range dirs {
+			if err := w.Add(dir); err != nil {
+				fmt.Fprintf(os.Stderr, "watcher: failed to watch dir %s: %v\n", dir, err)
+			}
+		}
+
+		go func() {
+			defer w.Close()
+			for {
+				select {
+				case ev := <-w.Events:
+					if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) != 0 &&
+						(ev.Name == certFile || ev.Name == keyFile) {
+						time.Sleep(100 * time.Millisecond)
+						if err := t.reloadCert(); err != nil {
+							fmt.Fprintf(os.Stderr, "cert reload error: %v\n", err)
+						}
+					}
+				case err := <-w.Errors:
+					fmt.Fprintf(os.Stderr, "watcher error: %v\n", err)
+				case <-t.done:
+					return
+				}
+			}
+		}()
+	})
+}
+
+// Close - stops file watching. Safe to call multiple times.
+func (t *TLSConfigBuilder) Close() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	select {
+	case <-t.done:
+		// already closed
+	default:
+		close(t.done)
+	}
+	t.watcher = nil
+}
+
+// VerifyCertTrusted - checks if a PEM-encoded certificate chain is trusted by the builder's CA pool.
+// The first certificate in the chain is the leaf; any remaining certificates are intermediates.
+// Verification uses a snapshot of the current CA pool and requires ExtKeyUsageServerAuth.
+func (t *TLSConfigBuilder) VerifyCertTrusted(certPEM []byte) error {
+	var certs []*x509.Certificate
+	rest := certPEM
+	for len(rest) > 0 {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return fmt.Errorf("parse certificate: %w", err)
+		}
+		certs = append(certs, cert)
+	}
+
+	if len(certs) == 0 {
+		return fmt.Errorf("no certificates found")
+	}
+
+	leaf := certs[0]
+	intermediates := x509.NewCertPool()
+	for _, c := range certs[1:] {
+		intermediates.AddCert(c)
 	}
 
 	t.mu.Lock()
-	certFile := t.certFile
-	keyFile := t.keyFile
+	roots := t.ca.Clone()
 	t.mu.Unlock()
 
-	w, err := fsnotify.NewWatcher()
+	_, err := leaf.Verify(x509.VerifyOptions{
+		Roots:         roots,
+		Intermediates: intermediates,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "watcher init error: %v\n", err)
-		return
+		return fmt.Errorf("certificate not trusted: %w", err)
 	}
-	t.watcher = w
-	dirs := map[string]struct{}{
-		filepath.Dir(certFile): {},
-		filepath.Dir(keyFile):  {},
-	}
-	for dir := range dirs {
-		if err := w.Add(dir); err != nil {
-			fmt.Fprintf(os.Stderr, "watcher: failed to watch dir %s: %v\n", dir, err)
-		}
-	}
-	go func() {
-		defer w.Close()
-		for {
-			select {
-			case ev := <-w.Events:
-				if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) != 0 &&
-					(ev.Name == certFile || ev.Name == keyFile) {
-					time.Sleep(100 * time.Millisecond)
-					if err := t.reloadCert(); err != nil {
-						fmt.Fprintf(os.Stderr, "cert reload error: %v\n", err)
-					}
-				}
-			case err := <-w.Errors:
-				fmt.Fprintf(os.Stderr, "watcher error: %v\n", err)
-			case <-t.done:
-				return
-			}
-		}
-	}()
-}
 
-// Close - stops file watching.
-func (t *TLSConfigBuilder) Close() {
-	if t.watcher != nil {
-		select {
-		case <-t.done:
-			// already closed
-		default:
-			close(t.done)
-		}
-		t.watcher = nil
-	}
-}
-
-// VerifyCertTrusted - checks if a given PEM cert is trusted by the internal CA pool.
-func (t *TLSConfigBuilder) VerifyCertTrusted(certPEM []byte) error {
-	certs, err := x509.ParseCertificates(certPEM)
-	if err != nil {
-		return fmt.Errorf("parse cert: %w", err)
-	}
-	for _, cert := range certs {
-		_, err := cert.Verify(x509.VerifyOptions{Roots: t.ca})
-		if err != nil {
-			return fmt.Errorf("cert not trusted: %w", err)
-		}
-	}
 	return nil
 }
