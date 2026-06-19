@@ -20,6 +20,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -41,8 +42,11 @@ type TLSConfigBuilder struct {
 	cert        atomic.Value // stores *tls.Certificate
 	watcher     *fsnotify.Watcher
 	watcherOnce sync.Once
+	watcherErr  error // written once inside watcherOnce.Do, protected by mu
 	done        chan struct{}
-	mu          sync.Mutex // protects ca, certFile, keyFile, clientAuth, insecure, watcher
+	certLoadMu  sync.Mutex // serialises the initial cert load from files; prevents concurrent reloadCert
+	logger      *slog.Logger
+	mu          sync.Mutex // protects ca, certFile, keyFile, clientAuth, insecure, watcher, watcherErr, logger
 }
 
 // NewTLSConfigBuilder - creates a new TLSConfigBuilder. If useSystemCA is true, it loads system root CAs.
@@ -65,6 +69,7 @@ func NewTLSConfigBuilder(useSystemCA bool) (*TLSConfigBuilder, error) {
 		t.ca = x509.NewCertPool()
 	}
 
+	// Finalizer is a last-resort backstop only. Callers must call Close() explicitly.
 	runtime.SetFinalizer(t, func(obj *TLSConfigBuilder) {
 		obj.Close()
 	})
@@ -72,12 +77,32 @@ func NewTLSConfigBuilder(useSystemCA bool) (*TLSConfigBuilder, error) {
 	return t, nil
 }
 
+// SetLogger - configures a structured logger for watcher diagnostics and security warnings.
+// Without a logger, messages fall back to os.Stderr. Call before ForServer to ensure
+// watcher diagnostics are routed to the application's observability stack.
+func (t *TLSConfigBuilder) SetLogger(logger *slog.Logger) {
+	t.mu.Lock()
+	t.logger = logger
+	t.mu.Unlock()
+}
+
 // SetInsecureSkipVerify - enables or disables skipping TLS verification.
 // WARNING: for testing only; never set true in production.
+// Setting true logs a warning via the configured logger or os.Stderr.
 func (t *TLSConfigBuilder) SetInsecureSkipVerify(skip bool) {
 	t.mu.Lock()
 	t.insecure = skip
+	logger := t.logger
 	t.mu.Unlock()
+
+	if skip {
+		const msg = "TLS certificate verification disabled; do not use in production"
+		if logger != nil {
+			logger.Warn(msg)
+		} else {
+			fmt.Fprintln(os.Stderr, "TLSConfigBuilder: WARNING:", msg)
+		}
+	}
 }
 
 // AddCAFile - loads a CA certificate from file and adds it to the pool.
@@ -196,6 +221,16 @@ func (t *TLSConfigBuilder) SetClientAuth(auth TLSClientAuth) {
 	t.mu.Unlock()
 }
 
+// WatcherErr - returns the error from the watcher initialisation, if any.
+// A non-nil value means certificate hot-reload is not active.
+// Call after ForServer to check whether the watcher started successfully.
+func (t *TLSConfigBuilder) WatcherErr() error {
+	t.mu.Lock()
+	err := t.watcherErr
+	t.mu.Unlock()
+	return err
+}
+
 // ForServer - returns a configured *tls.Config for server usage.
 // The returned config holds a snapshot of the CA pool at the time of the call.
 func (t *TLSConfigBuilder) ForServer() (*tls.Config, error) {
@@ -241,9 +276,9 @@ func (t *TLSConfigBuilder) injectServerCert(cfg *tls.Config) error {
 	hasPaths := t.certFile != "" && t.keyFile != ""
 	t.mu.Unlock()
 
-	if t.cert.Load() == nil && hasPaths {
-		if err := t.reloadCert(); err != nil {
-			return fmt.Errorf("server cert load: %w", err)
+	if hasPaths {
+		if err := t.loadCertIfNeeded("server"); err != nil {
+			return err
 		}
 	}
 	if cert, ok := t.cert.Load().(*tls.Certificate); ok {
@@ -261,13 +296,31 @@ func (t *TLSConfigBuilder) injectClientCert(cfg *tls.Config) error {
 	hasPaths := t.certFile != "" && t.keyFile != ""
 	t.mu.Unlock()
 
-	if t.cert.Load() == nil && hasPaths {
-		if err := t.reloadCert(); err != nil {
-			return fmt.Errorf("client cert load: %w", err)
+	if hasPaths {
+		if err := t.loadCertIfNeeded("client"); err != nil {
+			return err
 		}
 	}
 	if cert, ok := t.cert.Load().(*tls.Certificate); ok {
 		cfg.Certificates = []tls.Certificate{*cert}
+	}
+	return nil
+}
+
+// loadCertIfNeeded - loads the certificate from files exactly once on first call,
+// serialising concurrent callers with certLoadMu to eliminate the TOCTOU window
+// that arises from checking cert.Load() == nil before calling reloadCert().
+func (t *TLSConfigBuilder) loadCertIfNeeded(context string) error {
+	if t.cert.Load() != nil {
+		return nil
+	}
+	t.certLoadMu.Lock()
+	defer t.certLoadMu.Unlock()
+	if t.cert.Load() != nil {
+		return nil
+	}
+	if err := t.reloadCert(); err != nil {
+		return fmt.Errorf("%s cert load: %w", context, err)
 	}
 	return nil
 }
@@ -288,6 +341,7 @@ func (t *TLSConfigBuilder) reloadCert() error {
 
 // startWatcher - initializes a file watcher to monitor changes to cert and key files.
 // Safe to call concurrently; the watcher is started at most once.
+// If initialisation fails, WatcherErr() returns the error.
 func (t *TLSConfigBuilder) startWatcher() {
 	t.watcherOnce.Do(func() {
 		select {
@@ -299,11 +353,19 @@ func (t *TLSConfigBuilder) startWatcher() {
 		t.mu.Lock()
 		certFile := t.certFile
 		keyFile := t.keyFile
+		logger := t.logger
 		t.mu.Unlock()
 
 		w, err := fsnotify.NewWatcher()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "watcher init error: %v\n", err)
+			t.mu.Lock()
+			t.watcherErr = err
+			t.mu.Unlock()
+			if logger != nil {
+				logger.Error("watcher init failed", "err", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "TLSConfigBuilder: watcher init error: %v\n", err)
+			}
 			return
 		}
 
@@ -317,7 +379,11 @@ func (t *TLSConfigBuilder) startWatcher() {
 		}
 		for dir := range dirs {
 			if err := w.Add(dir); err != nil {
-				fmt.Fprintf(os.Stderr, "watcher: failed to watch dir %s: %v\n", dir, err)
+				if logger != nil {
+					logger.Error("watcher failed to add directory", "err", err)
+				} else {
+					fmt.Fprintf(os.Stderr, "TLSConfigBuilder: watcher failed to add directory: %v\n", err)
+				}
 			}
 		}
 
@@ -330,11 +396,19 @@ func (t *TLSConfigBuilder) startWatcher() {
 						(ev.Name == certFile || ev.Name == keyFile) {
 						time.Sleep(100 * time.Millisecond)
 						if err := t.reloadCert(); err != nil {
-							fmt.Fprintf(os.Stderr, "cert reload error: %v\n", err)
+							if logger != nil {
+								logger.Error("cert reload failed", "err", err)
+							} else {
+								fmt.Fprintf(os.Stderr, "TLSConfigBuilder: cert reload error: %v\n", err)
+							}
 						}
 					}
 				case err := <-w.Errors:
-					fmt.Fprintf(os.Stderr, "watcher error: %v\n", err)
+					if logger != nil {
+						logger.Warn("watcher error", "err", err)
+					} else {
+						fmt.Fprintf(os.Stderr, "TLSConfigBuilder: watcher error: %v\n", err)
+					}
 				case <-t.done:
 					return
 				}
@@ -361,6 +435,10 @@ func (t *TLSConfigBuilder) Close() {
 // The first certificate in the chain is the leaf; any remaining certificates are intermediates.
 // Verification uses a snapshot of the current CA pool and requires ExtKeyUsageServerAuth.
 func (t *TLSConfigBuilder) VerifyCertTrusted(certPEM []byte) error {
+	if len(certPEM) == 0 {
+		return fmt.Errorf("certificate data is empty")
+	}
+
 	var certs []*x509.Certificate
 	rest := certPEM
 	for len(rest) > 0 {

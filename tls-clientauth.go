@@ -27,7 +27,9 @@ const (
 	// TLSClientAuthRequest - server may request client cert but clients are not obligated to send it
 	TLSClientAuthRequest TLSClientAuth = TLSClientAuth(tls.RequestClientCert)
 
-	// TLSClientAuthRequire - clients should send a certificate however the cert does not need to be valid
+	// TLSClientAuthRequire - clients must send a certificate but the server does NOT verify it.
+	// Use only when post-handshake verification is handled at the application layer.
+	// To require a valid certificate use TLSClientAuthRequireVerify instead.
 	TLSClientAuthRequire TLSClientAuth = TLSClientAuth(tls.RequireAnyClientCert)
 
 	// TLSClientAuthVerify - server may request client cert and if client responds, the cert must be valid
