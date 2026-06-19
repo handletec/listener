@@ -68,7 +68,11 @@ func main() {
 		log.Println(err)
 		os.Exit(1)
 	}
-	restListener.Init(logger, rest.DefaultAddr, rest.DefaultPort, tlsCfg)
+	err = restListener.Init(logger, rest.DefaultAddr, rest.DefaultPort, tlsCfg)
+	if nil != err {
+		log.Println(err)
+		os.Exit(1)
+	}
 	err = restListener.Start()
 	if nil != err {
 		log.Println(err)

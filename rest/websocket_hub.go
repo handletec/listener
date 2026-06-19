@@ -137,6 +137,17 @@ func (c *wsClient) writer() {
 		_ = c.conn.Close(websocket.StatusNormalClosure, "bye")
 		close(c.closed)
 	}()
+	// Each write uses a fresh context so that an individual write timeout does
+	// not cancel the entire connection. The connection lifetime is managed by
+	// the hub: wsHub.Remove closes c.out (via wsClient.close), which terminates
+	// this range loop and triggers the deferred conn.Close above.
+	//
+	// Design note: writes are not tied to a per-connection or server shutdown
+	// context. On Stop(), wsHub.Close() calls cl.close() for every registered
+	// client, which closes c.out and stops this goroutine. In-flight writes
+	// may complete before the loop exits, but they are bounded by WriteTimeout.
+	// This is an intentional trade-off: avoiding a shared context prevents a
+	// single slow write from cancelling pending messages for other clients.
 	for m := range c.out {
 		var (
 			ctx    context.Context = context.Background()
@@ -169,9 +180,3 @@ func (c *wsClient) close() {
 	c.closeOnce.Do(func() { close(c.out) })
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}

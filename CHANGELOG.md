@@ -4,6 +4,14 @@
 
 ### Breaking Changes
 
+#### `NewCORS()` default `AllowedOrigins` changed from wildcard to deny-all
+
+**Before:** `NewCORS()` defaulted `AllowedOrigins` to `["https://*", "http://*"]`, permitting all HTTPS and HTTP origins.
+
+**After:** `AllowedOrigins` defaults to `nil`. All cross-origin requests are denied unless callers explicitly call `SetOrigins`.
+
+**Migration:** Call `cors.SetOrigins([]string{"https://example.com"})` with the specific origins your service accepts. Never combine wildcard origins (`"*"` or `"https://*"`) with `AllowCredentials = true`.
+
 #### `ForClient` now returns `(*tls.Config, error)`
 
 **Before:**

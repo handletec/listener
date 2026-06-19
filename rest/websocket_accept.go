@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -55,6 +56,18 @@ func (l *Listener) wsAccept(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// NOTE: do not defer Close here — writer goroutine does it on exit.
+
+	// After upgrade, the HTTP response writer is no longer valid. A panic in
+	// any step below (including the caller-supplied wsHandler) must be caught
+	// here and result in a clean WebSocket close frame rather than an attempt
+	// to write an http.Error on an already-upgraded connection.
+	defer func() {
+		if rec := recover(); rec != nil {
+			l.logger.Error("ws handler panic", "err", rec)
+			// Best-effort: send StatusInternalError close frame to the peer.
+			_ = c.Close(websocket.StatusInternalError, "internal error")
+		}
+	}()
 
 	// 4) Per-connection limits
 	if ws.MaxReadBytes > 0 {
@@ -106,12 +119,7 @@ func wsOriginAllowed(r *http.Request, allowed []string) bool {
 
 	// If no Origin header, allow only when "*" is explicitly configured.
 	if origin == "" {
-		for _, o := range allowed {
-			if o == "*" {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(allowed, "*")
 	}
 
 	for _, o := range allowed {

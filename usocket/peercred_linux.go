@@ -24,6 +24,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// checkPeerCred verifies the peer's credentials on Linux via SO_PEERCRED.
+//
+// Platform semantics (Linux):
+//   - UCred.Uid is the peer's real UID (not effective UID).
+//   - UCred.Gid is the peer's real GID (not effective GID).
+//   - Supplementary group membership is NOT checked; only the primary real GID
+//     is compared against allowGIDs.
+//
+// See Config.AllowUIDs / Config.AllowGIDs for gate logic and empty-list behaviour.
 func checkPeerCred(c *net.UnixConn, allowUIDs, allowGIDs []uint32) (bool, error) {
 	rc, err := c.SyscallConn()
 	if err != nil {

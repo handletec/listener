@@ -56,9 +56,9 @@ func (c *Config) EnableWebSockets(path string, allowedOrigins []string) {
 		c.WS.Path = path
 	}
 
-	if allowedOrigins == nil {
-		allowedOrigins = []string{"https://*", "http://*"} // if no origins are given, we default to these safe options
-	}
+	// AllowedOrigins is stored as-is; a nil/empty slice causes wsOriginAllowed
+	// to deny all cross-origin requests, which is the safe default.
+	// Callers must provide explicit origins (e.g. "https://example.com").
 	c.WS.AllowedOrigins = allowedOrigins
 
 }

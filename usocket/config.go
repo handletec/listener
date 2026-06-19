@@ -31,8 +31,26 @@ type Config struct {
 	MaxConns      int                  // 0 = unlimited concurrent handlers
 	ReadTimeout   time.Duration        // per-conn read deadline; 0 = none
 	WriteTimeout  time.Duration        // per-conn write deadline; 0 = none
-	AllowUIDs     []uint32             // if set, require SO_PEERCRED/XUCRED uid in this list
-	AllowGIDs     []uint32             // if set, require SO_PEERCRED/XUCRED gid in this list
+	// AllowUIDs and AllowGIDs control peer credential enforcement.
+	//
+	// Gate logic: enforcement is triggered when len(AllowUIDs) > 0 OR
+	// len(AllowGIDs) > 0.  Inside checkPeerCred both lists are checked with
+	// AND semantics, but an empty list passes automatically (inList returns true
+	// for an empty list).  Consequences:
+	//
+	//   - Setting only AllowUIDs leaves AllowGIDs unrestricted (any GID accepted).
+	//   - Setting only AllowGIDs leaves AllowUIDs unrestricted (any UID accepted).
+	//   - Setting both enforces UID AND GID.
+	//   - Setting neither disables peer-cred checking entirely.
+	//
+	// If you intend to restrict by both UID and GID, you must populate both lists.
+	//
+	// Platform semantics:
+	//   Linux  — checks real UID and real GID from SO_PEERCRED (UCred.Uid / UCred.Gid).
+	//   Darwin — checks effective UID and primary effective group (XUCRED Groups[0]).
+	//   Supplementary group membership is NOT checked on either platform.
+	AllowUIDs []uint32 // if set, require peer real/effective UID in this list
+	AllowGIDs []uint32 // if set, require peer primary real/effective GID in this list
 	Handler       func(net.Conn) error // REQUIRED: per-conn handler
 }
 

@@ -24,6 +24,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// checkPeerCred verifies the peer's credentials on Darwin via LOCAL_PEERCRED.
+//
+// Platform semantics (Darwin / macOS):
+//   - XUCRED.Uid is the peer's effective UID (not real UID).
+//   - XUCRED.Groups[0] is the peer's primary effective group (not real GID).
+//   - XUCRED.Ngroups may include supplementary groups in Groups[1..], but only
+//     Groups[0] (the primary effective group) is compared against allowGIDs.
+//     Supplementary group membership is intentionally NOT checked.
+//   - A peer whose effective group is not in allowGIDs will be denied even if
+//     one of its supplementary groups is allowed. Widen allowGIDs if needed.
+//
+// Cross-platform note: Linux checks real UID/GID; Darwin checks effective
+// UID and primary effective group. These semantics differ silently. See
+// Config.AllowUIDs / Config.AllowGIDs for gate logic and empty-list behaviour.
 func checkPeerCred(c *net.UnixConn, allowUIDs, allowGIDs []uint32) (bool, error) {
 	rc, err := c.SyscallConn()
 	if err != nil {
@@ -37,7 +51,7 @@ func checkPeerCred(c *net.UnixConn, allowUIDs, allowGIDs []uint32) (bool, error)
 			sysErr = e
 			return
 		}
-		// Primary group is Groups[0] when present
+		// Primary group is Groups[0] when present; supplementary groups are not checked.
 		var gid uint32
 		if xu.Ngroups > 0 {
 			gid = xu.Groups[0]

@@ -59,8 +59,11 @@ func (u *Listener) Init(logger *slog.Logger, socketpath string, _ int, tlsConfig
 	if socketpath == "" {
 		return errors.New("unix: empty socket path")
 	}
+	// Canonicalize the path to prevent path-traversal strings such as
+	// '../../../tmp/evil.sock' from being accepted and used in os.MkdirAll,
+	// net.Listen, os.Chmod, os.Chown, and os.Remove.
 	u.logger = logger
-	u.path = socketpath
+	u.path = filepath.Clean(socketpath)
 	u.tlsConfig = tlsConfig
 	if tlsConfig != nil {
 		u.logger.Warn("unix: tlsConfig ignored for UDS")
@@ -99,8 +102,14 @@ func (u *Listener) Start() error {
 		return errors.New("unix: already started")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(u.path), 0o750); err != nil {
-		return fmt.Errorf("unix: mkdir %s: %w", filepath.Dir(u.path), err)
+	socketDir := filepath.Dir(u.path)
+	if err := os.MkdirAll(socketDir, 0o750); err != nil {
+		return fmt.Errorf("unix: mkdir %s: %w", socketDir, err)
+	}
+	// Enforce the directory permissions explicitly after MkdirAll so that the
+	// caller's umask does not produce a more restrictive directory than intended.
+	if err := os.Chmod(socketDir, 0o750); err != nil {
+		return fmt.Errorf("unix: chmod dir %s: %w", socketDir, err)
 	}
 
 	if u.cfg.RemoveStale {
@@ -157,6 +166,10 @@ func (u *Listener) Close() error {
 		u.mu.Unlock()
 		return nil
 	}
+	// Reset u.started before releasing the lock so that a concurrent Close()
+	// caller finds started==false and returns early rather than closing an
+	// already-closed channel (which would panic).
+	u.started = false
 	close(u.quit)
 	_ = u.l.Close() // unblock Accept
 	u.mu.Unlock()

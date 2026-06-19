@@ -22,7 +22,10 @@ import (
 )
 
 const (
-	// DefaultAddr - listen on all IPv4 and IPv6 interfaces
+	// DefaultAddr binds on all IPv4 and IPv6 interfaces (dual-stack wildcard).
+	// WARNING: this exposes the listener on every network interface of the host.
+	// In restricted or multi-homed environments use "127.0.0.1" or a specific
+	// interface address to limit exposure.
 	DefaultAddr = "[::]"
 
 	// DefaultPort - default port to listen on
@@ -112,6 +115,18 @@ func (l *Listener) Start() (err error) {
 		return errors.New("REST start: no HTTP routers configured")
 	}
 
+	// Guard: credentialed cross-origin requests from wildcard origins are
+	// effectively unauthenticated. Log a fatal warning so operators notice
+	// this misconfiguration at startup.
+	if l.config.CORS.AllowCredentials {
+		for _, o := range l.config.CORS.AllowedOrigins {
+			if strings.HasSuffix(o, "://*") || o == "*" {
+				l.logger.Warn("CORS misconfiguration: AllowCredentials=true combined with a wildcard origin permits credentialed requests from any domain",
+					"origin", o)
+			}
+		}
+	}
+
 	router := chi.NewRouter()
 
 	// Common middlewares for everything (safe for WS and REST):
@@ -130,10 +145,20 @@ func (l *Listener) Start() (err error) {
 	})
 	router.Use(middleware.NoCache)
 	router.Use(func(next http.Handler) http.Handler {
+		// tlsActive captures whether TLS is configured at middleware build time
+		// so the closure does not dereference l.tlsConfig on every request.
+		tlsActive := l.tlsConfig != nil
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			w.Header().Set("X-Frame-Options", "DENY")
 			w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+			// Restrictive CSP: deny all by default; callers may override per-route.
+			w.Header().Set("Content-Security-Policy", "default-src 'none'")
+			// HSTS: only meaningful over TLS; omit for plain HTTP to avoid
+			// browsers refusing future plain-HTTP uses of the same host.
+			if tlsActive {
+				w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+			}
 			next.ServeHTTP(w, r)
 		})
 	})
@@ -198,6 +223,11 @@ func (l *Listener) Start() (err error) {
 	}))
 
 	l.logger.Debug("CORS", "allowed origins", l.config.CORS.AllowedOrigins, "allowed methods", l.config.CORS.AllowedMethods, "allowed headers", l.config.CORS.AllowedHeaders)
+	if l.config.CORS.Debug {
+		// CORS debug mode leaks routing and origin-matching logic to stderr
+		// and response writers. Must not be enabled in production.
+		l.logger.Warn("CORS debug mode is enabled — disable before deploying to production")
+	}
 
 	api.Use(headerMiddleware(l.header))
 
@@ -212,11 +242,21 @@ func (l *Listener) Start() (err error) {
 	address := fmt.Sprintf("%s:%d", l.address, l.port)
 
 	// Build server so we can shutdown gracefully later and to ensure 'server' is used.
+	// ReadHeaderTimeout: hard limit for receiving the request header.
+	// ReadTimeout:       covers header + body read; set above Timeout to avoid
+	//                   cutting off legitimate slow uploads before the handler runs.
+	// WriteTimeout:      network-level write deadline; set above Timeout so the
+	//                   middleware context cancel fires first for clean responses.
+	// IdleTimeout:       keep-alive connection limit; prevents lingering idle
+	//                   connections from exhausting file descriptors over time.
 	l.server = &http.Server{
 		Addr:              address,
 		Handler:           router,
 		TLSConfig:         l.tlsConfig,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       l.config.Timeout + 5*time.Second,
+		WriteTimeout:      l.config.Timeout + 10*time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	if nil != l.tlsConfig && len(l.tlsConfig.Certificates) > 0 {
